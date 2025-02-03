@@ -1,0 +1,5 @@
+# ninja log v6
+7	240	7603238865087985	CMakeFiles/ZOS.dir/pseudo_fat_cp.c.obj	e375cd8e610ff1db
+241	407	7603238867418001	ZOS.exe	43ec10f2ebe24d37
+16	140	7603240413824233	CMakeFiles/ZOS.dir/pseudo_fat_cp.c.obj	3db36fefa44cbe0b
+140	248	7603240415062434	ZOS.exe	43ec10f2ebe24d37
