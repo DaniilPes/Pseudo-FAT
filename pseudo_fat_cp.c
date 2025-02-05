@@ -15,7 +15,6 @@
 int fat[MAX_CLUSTERS];
 static size_t cluster_count = 0;
 
-
 // Pseudo FAT structure (simplified for the task)
 typedef struct {
     char filename[MAX_PATH_LENGTH];
@@ -30,8 +29,8 @@ typedef struct {
     void (*command_func)(const char *);
 } Command;
 
-void cp(const char *arg1, const char *arg2);
-void mv(const char *arg1, const char *arg2);
+void cp(const char *arg1);
+void mv(const char *arg1);
 void rm(const char *arg1);
 void create_directory(const char *arg);
 int remove_directory(const char *arg);
@@ -225,6 +224,7 @@ void add_to_filesystem(const char *name, int is_directory) {
 // Function to list files in a directory
 void ls(const char *dirname) {
     char target_path[MAX_PATH_LENGTH];
+
     if (dirname == NULL || strcmp(dirname, "") == 0) {
         strncpy(target_path, current_path, MAX_PATH_LENGTH);
     } else {
@@ -238,22 +238,50 @@ void ls(const char *dirname) {
     }
 
     int found = 0;
+    int dir_exists = 0;  // Флаг существования директории
+
+    // Проверяем, существует ли папка
+    for (size_t i = 0; i < file_count; i++) {
+        printf("%s === %s\n", filesystem[i].filename , target_path);
+        if (strcmp(filesystem[i].filename, target_path) == 0 && filesystem[i].is_directory) {
+            dir_exists = 1;
+            break;
+        }
+    }
+
+    // Проверяем, есть ли внутри каталога файлы или подпапки (даже если он сам не записан в файловой системе)
     for (size_t i = 0; i < file_count; i++) {
         if (strncmp(filesystem[i].filename, target_path, target_len) == 0) {
-            printf("%s: %s\n", filesystem[i].is_directory ? "DIR" : "FILE",
-                   filesystem[i].filename + target_len);
+            dir_exists = 1;
+            break;
+        }
+    }
+
+    if (!dir_exists) {
+        printf("PATH NOT FOUND\n");
+        return;
+    }
+
+    // Проверяем содержимое директории
+    for (size_t i = 0; i < file_count; i++) {
+        if (strncmp(filesystem[i].filename, target_path, target_len) == 0) {
+            const char *subpath = filesystem[i].filename + target_len;
+
+            // Пропускаем вложенные файлы и папки (оставляем только элементы первого уровня)
+            if (strchr(subpath, '/') != NULL) {
+                continue;
+            }
+
+            printf("%s: %s\n", filesystem[i].is_directory ? "DIR" : "FILE", subpath);
             found = 1;
         }
-        if (filesystem[i].is_directory) {
-            found = 1; // Директория существует
-        }
     }
 
+    // Если папка существует, но в ней ничего нет, можно просто не выводить ничего
     if (!found) {
-        printf("PATH NOT FOUND\n");
+        printf("EMPTY\n"); // Удалите эту строку, если нужно просто пустое место
     }
 }
-
 // Function to change current directory
 void cd(const char *dirname) {
     char new_path[MAX_PATH_LENGTH];
@@ -297,11 +325,7 @@ void create_directory(const char *dirname) {
 
 int remove_directory(const char *dirname) {
     char full_path[MAX_PATH_LENGTH];
-    if (dirname[0] == '/') {
-        strncpy(full_path, dirname, MAX_PATH_LENGTH);
-    } else {
-        snprintf(full_path, MAX_PATH_LENGTH, "%s/%s", current_path, dirname);
-    }
+    normalize_path(full_path, dirname);
 
     int dir_index = find_file(full_path);
     if (dir_index == -1 || !filesystem[dir_index].is_directory) {
@@ -309,14 +333,17 @@ int remove_directory(const char *dirname) {
         return -1;
     }
 
+    // Проверяем, есть ли внутри директории файлы/папки
     for (size_t i = 0; i < file_count; i++) {
         if (strncmp(filesystem[i].filename, full_path, strlen(full_path)) == 0 &&
             strlen(filesystem[i].filename) > strlen(full_path)) {
-            printf("NOT EMPTY\n");
-            return -1;
+
+            // Если внутри есть файлы или папки, рекурсивно удаляем их
+            remove_directory(filesystem[i].filename);
             }
     }
 
+    // Удаляем саму директорию
     for (size_t i = dir_index; i < file_count - 1; i++) {
         filesystem[i] = filesystem[i + 1];
     }
@@ -326,16 +353,52 @@ int remove_directory(const char *dirname) {
     return 0;
 }
 
+
 // Function to copy a file in the pseudo filesystem
-void cp(const char *source, const char *destination) {
-    int src_index = find_file(source);
+void cp(const char *args) {
+    if (!args || strlen(args) == 0) {
+        printf("INVALID ARGUMENTS\n");
+        return;
+    }
+
+    char source[MAX_PATH_LENGTH], destination[MAX_PATH_LENGTH];
+
+    // Разбираем строку args: "f1 a1"
+    int parsed = sscanf(args, "%s %s", source, destination);
+    if (parsed != 2) {
+        printf("INVALID ARGUMENTS\n");
+        return;
+    }
+
+    // Проверка: destination не должен быть пустым или "/"
+    if (strlen(destination) == 0 || strcmp(destination, "/") == 0) {
+        printf("INVALID DESTINATION NAME\n");
+        return;
+    }
+
+    // Проверяем, заканчивается ли destination на "/"
+    if (destination[strlen(destination) - 1] == '/') {
+        printf("INVALID DESTINATION NAME: Cannot copy to a directory without a filename\n");
+        return;
+    }
+
+    printf("source: %s _ dest: %s\n", source, destination); // Отладочный вывод
+
+    char src_path[MAX_PATH_LENGTH], dest_path[MAX_PATH_LENGTH];
+    normalize_path(src_path, source);
+    normalize_path(dest_path, destination);
+
+    int src_index = find_file(src_path);
     if (src_index == -1) {
         printf("FILE NOT FOUND\n");
         return;
     }
 
-    if (find_file(destination) != -1) {
-        printf("PATH NOT FOUND\n"); // File already exists
+    FileEntry *src_entry = &filesystem[src_index];
+
+    // Проверяем, существует ли уже объект с таким именем
+    if (find_file(dest_path) != -1) {
+        printf("PATH NOT FOUND (alrdy exists)\n"); // Файл уже существует
         return;
     }
 
@@ -344,31 +407,88 @@ void cp(const char *source, const char *destination) {
         return;
     }
 
-    FileEntry new_file;
-    strncpy(new_file.filename, destination, MAX_PATH_LENGTH);
-    new_file.size = filesystem[src_index].size;
-    new_file.start_cluster = filesystem[src_index].start_cluster;
-    new_file.is_directory = filesystem[src_index].is_directory;
+    // Если source — это папка, рекурсивно копируем её содержимое
+    if (src_entry->is_directory) {
+        printf("Copying directory %s -> %s\n", src_path, dest_path);
 
-    filesystem[file_count++] = new_file;
+        // Создаём новую папку
+        add_to_filesystem(dest_path, 1);
+
+        // Копируем всё содержимое
+        size_t src_len = strlen(src_path);
+        for (size_t i = 0; i < file_count; i++) {
+            if (strncmp(filesystem[i].filename, src_path, src_len) == 0 &&
+                filesystem[i].filename[src_len] == '/') {
+
+                char new_dest[MAX_PATH_LENGTH];
+                snprintf(new_dest, MAX_PATH_LENGTH, "%s%s", dest_path, filesystem[i].filename + src_len);
+
+                char sub_args[MAX_PATH_LENGTH * 2];
+                snprintf(sub_args, sizeof(sub_args), "%s %s", filesystem[i].filename, new_dest);
+
+                cp(sub_args);
+            }
+        }
+    } else {
+        // Копируем обычный файл
+        FileEntry new_file;
+        strncpy(new_file.filename, dest_path, MAX_PATH_LENGTH);
+        new_file.size = src_entry->size;
+        new_file.start_cluster = src_entry->start_cluster;
+        new_file.is_directory = 0;
+
+        filesystem[file_count++] = new_file;
+    }
 
     printf("OK\n");
 }
 
 // Function to move or rename a file in the pseudo filesystem
-void mv(const char *source, const char *destination) {
-    int src_index = find_file(source);
+void mv(const char *args) {
+    if (!args || strlen(args) == 0) {
+        printf("INVALID ARGUMENTS\n");
+        return;
+    }
+
+    char source[MAX_PATH_LENGTH], destination[MAX_PATH_LENGTH];
+
+    // Разбираем строку args: "f1 a1"
+    int parsed = sscanf(args, "%s %s", source, destination);
+    if (parsed != 2) {
+        printf("INVALID ARGUMENTS\n");
+        return;
+    }
+
+    printf("source: %s _ dest: %s\n", source, destination); // Отладочный вывод
+
+    char src_path[MAX_PATH_LENGTH], dest_path[MAX_PATH_LENGTH];
+    normalize_path(src_path, source);
+    normalize_path(dest_path, destination);
+
+    int src_index = find_file(src_path);
     if (src_index == -1) {
         printf("FILE NOT FOUND\n");
         return;
     }
 
-    if (find_file(destination) != -1) {
-        printf("PATH NOT FOUND\n");
+    // Проверяем, существует ли уже объект с таким именем
+    int dest_index = find_file(dest_path);
+
+    if (dest_index != -1 && filesystem[dest_index].is_directory) {
+        // Если destination — это папка, добавляем к пути имя файла
+        char final_dest[MAX_PATH_LENGTH];
+        snprintf(final_dest, MAX_PATH_LENGTH, "%s/%s", dest_path, strrchr(src_path, '/') ? strrchr(src_path, '/') + 1 : src_path);
+        strncpy(dest_path, final_dest, MAX_PATH_LENGTH);
+    }
+
+    // Проверяем, существует ли уже файл/папка с таким именем
+    if (find_file(dest_path) != -1) {
+        printf("PATH NOT FOUND\n"); // Файл уже существует
         return;
     }
 
-    strncpy(filesystem[src_index].filename, destination, MAX_PATH_LENGTH);
+    // Переименовываем/перемещаем файл
+    strncpy(filesystem[src_index].filename, dest_path, MAX_PATH_LENGTH);
     printf("OK\n");
 }
 
@@ -672,7 +792,6 @@ void normalize_path(char *normalized_path, const char *input_path) {
     *dst = '\0';
 }
 
-
 void bug(const char *arg) {
     // Для примера ожидаем, что аргумент содержит имя файла, который хотим повредить.
     // Например, "s1" означает файл "s1.txt" (или "/s1.txt" в файловой системе)
@@ -821,10 +940,12 @@ int main(int argc, char *argv[]) {
     disk_filename[MAX_PATH_LENGTH - 1] = '\0'; // защита от переполнения
 
     initialize_filesystem();
-    add_to_filesystem("file1.txt", 0);
-    add_to_filesystem("file2.txt", 0);
+    add_to_filesystem("f1", 0);
+    add_to_filesystem("f2", 0);
     // format("10MB");
-    add_to_filesystem("large_file.txt", 0);
+    add_to_filesystem("a1", 1);
+    add_to_filesystem("a1/f3", 0);
+    add_to_filesystem("aue", 1);
 
 
         // testBase();
@@ -839,7 +960,7 @@ int main(int argc, char *argv[]) {
         }
 
         // Убираем \n в конце
-        line[strcspn(line, "\n")] = '\0';
+        line[strcspn(line, "\r\n")] = '\0';
 
         // Если пользователь ввёл пустую строку — пропускаем
         if (strlen(line) == 0) {
