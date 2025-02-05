@@ -7,8 +7,8 @@
 #define MAX_PATH_LENGTH 256
 #define CLUSTER_SIZE 4096
 #define MAX_CLUSTERS 4096
-#define FAT_FREE 0
-#define FAT_END (-1)
+#define FAT_FREE (-1)
+#define FAT_END (-2)
 
 int fat[MAX_CLUSTERS];
 static size_t cluster_count = 0;
@@ -683,10 +683,10 @@ void bug(const char *arg) {
 
     FileEntry *entry = &filesystem[index];
 
-    // if (entry->start_cluster == FAT_FREE) {
-    //     printf("FILE %s has no clusters allocated.\n", filename);
-    //     return;
-    // }
+    if (entry->start_cluster == FAT_FREE) {
+        printf("FILE %s has no clusters allocated.\n", filename);
+        return;
+    }
 
     // Попробуем повредить один из кластеров файла.
     // Если файл занимает хотя бы два кластера, повредим второй; иначе — первый.
@@ -769,7 +769,7 @@ void testBase() {
 
     int index = find_file("/large_file.txt");
     if (index != -1) {
-        filesystem[index].size = 5 * 4096; // 7 кластеров по 4096 байт
+        filesystem[index].size = 50 * 4096; // 7 кластеров по 4096 байт
         allocate_cluster(&filesystem[index]);
         info("/large_file.txt");
 
@@ -786,17 +786,15 @@ void testBase() {
     // ls(NULL);//fix
     // outcp("zzooss.txt", "zxc.txt"); //true
         // load("C:/v/commands.txt"); true
-    for (size_t i = 0; i < file_count; i++) {
-        printf("%zu) %s start=%zu end=%zu size=%zu is_dir=%d\n",
-               i, filesystem[i].filename, filesystem[i].start_cluster,
-               filesystem[i].end_cluster, filesystem[i].size,
-               filesystem[i].is_directory);
-    }
+
 
     printf("%llu\n",filesystem[index].size);
     info("/large_file.txt");
     fs_info();
+
     bug("large_file");
+    check();
+
 
     // ls(NULL);
     // printf("123\n");
