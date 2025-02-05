@@ -3,6 +3,8 @@
 #include <string.h>
 #include <unistd.h>
 #include <sys/stat.h>
+#include <errno.h>
+
 
 #define MAX_PATH_LENGTH 256
 #define CLUSTER_SIZE 4096
@@ -42,7 +44,7 @@ void incp(const char *arg1, const char *arg2);
 void outcp(const char *arg1, const char *arg2);
 void format(const char *arg);
 void load(const char *filename);
-void normalize_filesystem_paths();
+void normalize_path();
 void bug(const char *arg);
 void check();
 void fs_info();
@@ -55,8 +57,8 @@ Command command_table[] = {
     {"cp", (void (*)(const char *))cp},
     {"mv", (void (*)(const char *))mv},
     {"rm", rm},
-    {"create_directory", create_directory},
-    {"remove_directory", remove_directory_wrapper}, // Используем обёртку
+    {"mkdir", create_directory},
+    {"rmdir", remove_directory_wrapper}, // Используем обёртку
     {"ls", ls},
     {"cat", cat},
     {"cd", cd},
@@ -225,13 +227,10 @@ void ls(const char *dirname) {
     char target_path[MAX_PATH_LENGTH];
     if (dirname == NULL || strcmp(dirname, "") == 0) {
         strncpy(target_path, current_path, MAX_PATH_LENGTH);
-    } else if (dirname[0] == '/') {
-        strncpy(target_path, dirname, MAX_PATH_LENGTH);
     } else {
-        snprintf(target_path, MAX_PATH_LENGTH, "%s/%s", current_path, dirname);
+        normalize_path(target_path, dirname);
     }
 
-    // Убедимся, что target_path оканчивается на "/"
     size_t target_len = strlen(target_path);
     if (target_path[target_len - 1] != '/') {
         strncat(target_path, "/", MAX_PATH_LENGTH - target_len - 1);
@@ -240,11 +239,13 @@ void ls(const char *dirname) {
 
     int found = 0;
     for (size_t i = 0; i < file_count; i++) {
-        // Сравниваем путь в файловой системе с target_path
         if (strncmp(filesystem[i].filename, target_path, target_len) == 0) {
             printf("%s: %s\n", filesystem[i].is_directory ? "DIR" : "FILE",
                    filesystem[i].filename + target_len);
             found = 1;
+        }
+        if (filesystem[i].is_directory) {
+            found = 1; // Директория существует
         }
     }
 
@@ -256,27 +257,23 @@ void ls(const char *dirname) {
 // Function to change current directory
 void cd(const char *dirname) {
     char new_path[MAX_PATH_LENGTH];
+    normalize_path(new_path, dirname);
+
     if (strcmp(dirname, ".") == 0) {
         printf("OK\n");
         return;
     }
 
     if (strcmp(dirname, "..") == 0) {
-        // Move up one directory
+        // Подняться на уровень выше
         char *last_slash = strrchr(current_path, '/');
         if (last_slash != NULL && last_slash != current_path) {
             *last_slash = '\0';
         } else {
             strcpy(current_path, "/");
         }
-        printf("OK\n");
+        printf("OK - current path: %s\n", current_path);
         return;
-    }
-
-    if (dirname[0] == '/') {
-        strncpy(new_path, dirname, MAX_PATH_LENGTH);
-    } else {
-        snprintf(new_path, MAX_PATH_LENGTH, "%s/%s", current_path, dirname);
     }
 
     int dir_index = find_file(new_path);
@@ -286,7 +283,7 @@ void cd(const char *dirname) {
     }
 
     strncpy(current_path, new_path, MAX_PATH_LENGTH);
-    printf("OK - your current path is: %s\n",new_path);
+    printf("OK - current path: %s\n", current_path);
 }
 
 // Function to print current working directory
@@ -377,7 +374,10 @@ void mv(const char *source, const char *destination) {
 
 // Function to remove a file in the pseudo filesystem
 void rm(const char *filename) {
-    int index = find_file(filename);
+    char full_path[MAX_PATH_LENGTH];
+    normalize_path(full_path, filename);
+
+    int index = find_file(full_path);
     if (index == -1) {
         printf("FILE NOT FOUND\n");
         return;
@@ -648,21 +648,30 @@ void test_functions() {
     // bug();
 }
 
-void normalize_filesystem_paths() {
-    for (size_t i = 0; i < file_count; i++) {
-        char *src = filesystem[i].filename;
-        char *dest = filesystem[i].filename;
-
-        // Удаляем лишние слэши
-        while (*src) {
-            *dest = *src++;
-            if (*dest != '/' || (dest == filesystem[i].filename || *(dest - 1) != '/')) {
-                dest++;
-            }
+void normalize_path(char *normalized_path, const char *input_path) {
+    if (input_path[0] == '/') {
+        // Уже абсолютный путь
+        strncpy(normalized_path, input_path, MAX_PATH_LENGTH);
+    } else {
+        // Добавляем текущий путь
+        if (strcmp(current_path, "/") == 0) {
+            snprintf(normalized_path, MAX_PATH_LENGTH, "/%s", input_path);
+        } else {
+            snprintf(normalized_path, MAX_PATH_LENGTH, "%s/%s", current_path, input_path);
         }
-        *dest = '\0';
     }
+
+    // Убираем двойные слэши, если они появились
+    char *src = normalized_path, *dst = normalized_path;
+    while (*src) {
+        *dst = *src++;
+        if (*dst != '/' || (dst == normalized_path || *(dst - 1) != '/')) {
+            dst++;
+        }
+    }
+    *dst = '\0';
 }
+
 
 void bug(const char *arg) {
     // Для примера ожидаем, что аргумент содержит имя файла, который хотим повредить.
@@ -811,11 +820,42 @@ int main(int argc, char *argv[]) {
     strncpy(disk_filename, argv[1], MAX_PATH_LENGTH);
     disk_filename[MAX_PATH_LENGTH - 1] = '\0'; // защита от переполнения
 
-    // Normally, you would load or initialize your pseudo filesystem here.
-    // For testing purposes, we directly test the functions.
-    // test_functions();
-    testBase();
-    // normalize_filesystem_paths();
+    initialize_filesystem();
+    add_to_filesystem("file1.txt", 0);
+    add_to_filesystem("file2.txt", 0);
+    // format("10MB");
+    add_to_filesystem("large_file.txt", 0);
+
+
+        // testBase();
+    char line[256];
+    while (1) {
+        printf("myFS> ");
+        fflush(stdout);
+
+        if (!fgets(line, sizeof(line), stdin)) {
+            // Если fgets вернул NULL, значит EOF или ошибка
+            break;
+        }
+
+        // Убираем \n в конце
+        line[strcspn(line, "\n")] = '\0';
+
+        // Если пользователь ввёл пустую строку — пропускаем
+        if (strlen(line) == 0) {
+            continue;
+        }
+
+        // Можно сделать команду "exit" для выхода
+        if (strcmp(line, "exit") == 0) {
+            printf("Bye!\n");
+            break;
+        }
+
+        // Передаём команду в ваш парсер
+        execute_command_with_args(line);
+    }
+
     return EXIT_SUCCESS;
 }
 
