@@ -38,7 +38,7 @@ void pwd();
 void info(const char *arg);
 void incp(const char *arg1, const char *arg2);
 void outcp(const char *arg1, const char *arg2);
-void format(size_t size_mb, const char *filename);
+void format(const char *arg);
 void load(const char *filename);
 void normalize_filesystem_paths();
 void bug();
@@ -73,6 +73,7 @@ Command command_table[] = {
 FileEntry filesystem[MAX_FILES];
 size_t file_count = 0;
 char current_path[MAX_PATH_LENGTH] = "/";
+char disk_filename[MAX_PATH_LENGTH];  // Здесь сохраним имя файла, переданного при запуске
 
 void initialize_fat() {
     for (int i = 0; i < MAX_CLUSTERS; i++) {
@@ -536,25 +537,62 @@ void load(const char *filename) {
     printf("OK\n");
 }
 
-void format(size_t size_mb, const char *filename) {
-    // Размер файла в байтах
-    size_t required_size = size_mb * 1024 * 1024;
+void format(const char *arg) {
+    // arg может быть "600MB" или просто "600" и т.п.
 
-    // Удаление содержимого файла (если файл существует)
-    FILE *fs_file = fopen(filename, "wb");
+    if (!arg || !*arg) {
+        printf("CANNOT CREATE FILE\n");
+        return;
+    }
+
+    // Разбираем строку "600MB" на число (600) и суффикс (MB)
+    long size_mb = 0;
+    char suffix[8] = {0};
+
+    // Пример простого разбора: берем число и до 2 символов суффикса
+    // Если строка "600MB", то size_mb=600, suffix="MB"
+    // Если "600", то size_mb=600, suffix=""
+    if (sscanf(arg, "%ld%2s", &size_mb, suffix) < 1) {
+        // Не смогли хотя бы число считать
+        printf("CANNOT CREATE FILE\n");
+        return;
+    }
+
+    // Проверка суффикса (если надо строго требовать "MB", делайте иначе)
+    // Допустим, разрешим и без суффикса:
+    if (strcasecmp(suffix, "MB") != 0 && suffix[0] != '\0') {
+        // Если суффикс не "MB" и не пуст, считаем ошибкой
+        printf("CANNOT CREATE FILE\n");
+        return;
+    }
+
+    if (size_mb <= 0) {
+        printf("CANNOT CREATE FILE\n");
+        return;
+    }
+
+    // Переводим мегабайты в байты
+    size_t required_size = (size_t)size_mb * 1024 * 1024;
+
+    // Используем файл, заданный при запуске (disk_filename)
+    FILE *fs_file = fopen(disk_filename, "wb");
     if (!fs_file) {
         printf("CANNOT CREATE FILE\n");
         return;
     }
 
-    // Установка нового размера файла
+    // Устанавливаем новый размер
     if (ftruncate(fileno(fs_file), required_size) != 0) {
-        printf("CANNOT CREATE FILE\n");
         fclose(fs_file);
+        printf("CANNOT CREATE FILE\n");
         return;
     }
 
     fclose(fs_file);
+
+    // Сбрасываем/инициализируем вашу псевдо-ФС в памяти:
+    initialize_filesystem();
+
     printf("OK\n");
 }
 
@@ -706,9 +744,10 @@ void testBase() {
     // ls(NULL);//fix
     // outcp("zzooss.txt", "zxc.txt"); //true
         // load("C:/v/commands.txt"); true
-    format(10, "large_file.txt");
+    format("100MB");
     printf("%llu\n",filesystem[index].size);
-    // info("/large_file.txt");
+    info("/large_file.txt");
+    printf("%s",disk_filename);
 
 
     // ls(NULL);
@@ -718,10 +757,13 @@ void testBase() {
 }
 
 int main(int argc, char *argv[]) {
-    // if (argc != 2) {
-    //     printf("Usage: %s <filesystem_file>\n", argv[0]);
-    //     return EXIT_FAILURE;
-    // }
+    if (argc != 2) {
+        printf("Usage: %s <filesystem_file>\n", argv[0]);
+        return EXIT_FAILURE;
+    }
+
+    strncpy(disk_filename, argv[1], MAX_PATH_LENGTH);
+    disk_filename[MAX_PATH_LENGTH - 1] = '\0'; // защита от переполнения
 
     // Normally, you would load or initialize your pseudo filesystem here.
     // For testing purposes, we directly test the functions.
