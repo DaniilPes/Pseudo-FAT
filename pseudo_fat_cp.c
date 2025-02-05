@@ -11,6 +11,8 @@
 #define FAT_END (-1)
 
 int fat[MAX_CLUSTERS];
+static size_t cluster_count = 0;
+
 
 // Pseudo FAT structure (simplified for the task)
 typedef struct {
@@ -41,13 +43,13 @@ void outcp(const char *arg1, const char *arg2);
 void format(const char *arg);
 void load(const char *filename);
 void normalize_filesystem_paths();
-void bug();
+void bug(const char *arg);
 void check();
+void fs_info();
 
 void remove_directory_wrapper(const char *arg) {
     remove_directory(arg); // Вызов оригинальной функции с адаптированным аргументом
 }
-
 
 Command command_table[] = {
     {"cp", (void (*)(const char *))cp},
@@ -74,6 +76,43 @@ FileEntry filesystem[MAX_FILES];
 size_t file_count = 0;
 char current_path[MAX_PATH_LENGTH] = "/";
 char disk_filename[MAX_PATH_LENGTH];  // Здесь сохраним имя файла, переданного при запуске
+
+
+void fs_info() {
+    // 1) Узнаём размер файла-образа через stat()
+    struct stat st;
+    if (stat(disk_filename, &st) != 0) {
+        // Если ошибка, выводим сообщение
+        printf("Cannot determine filesystem size (stat error: %d)\n", errno);
+        return;
+    }
+
+    // st.st_size — реальный размер файла-образа в байтах
+    printf("Filesystem total size: %zu bytes (%zu MB)\n", (size_t)st.st_size,(size_t)st.st_size / 1024/1024);
+
+
+    cluster_count = (size_t)st.st_size / CLUSTER_SIZE;
+
+    // 2) Подсчитаем свободные и занятые кластеры
+    int free_clusters = 0;
+    int used_clusters = 0;
+    for (int i = 0; i < cluster_count; i++) {
+        if (fat[i] == FAT_FREE) {
+            free_clusters++;
+        } else {
+            used_clusters++;
+        }
+    }
+    printf("Total clusters: %llu\n", cluster_count);
+    printf("Used clusters: %d\n", used_clusters);
+    printf("Free clusters: %d\n", free_clusters);
+
+    // Если хотите в байтах:
+    printf("Approx. used space: %zu bytes (%zu MB)\n", (size_t)used_clusters * CLUSTER_SIZE,
+        (size_t)used_clusters * CLUSTER_SIZE/1024/1024);
+    printf("Approx. free space: %zu bytes (%zu MB)\n", (size_t)free_clusters * CLUSTER_SIZE,
+        (size_t)free_clusters * CLUSTER_SIZE/1024/1024);
+}
 
 void initialize_fat() {
     for (int i = 0; i < MAX_CLUSTERS; i++) {
@@ -643,10 +682,11 @@ void bug(const char *arg) {
     }
 
     FileEntry *entry = &filesystem[index];
-    if (entry->start_cluster == FAT_FREE) {
-        printf("FILE %s has no clusters allocated.\n", filename);
-        return;
-    }
+
+    // if (entry->start_cluster == FAT_FREE) {
+    //     printf("FILE %s has no clusters allocated.\n", filename);
+    //     return;
+    // }
 
     // Попробуем повредить один из кластеров файла.
     // Если файл занимает хотя бы два кластера, повредим второй; иначе — первый.
@@ -688,6 +728,8 @@ void testBase() {
     add_to_filesystem("a1", 1);
 
 
+
+
     printf("Start Test...\n");
     // printf("1 - 4\n");
     // // 1 - 4
@@ -717,7 +759,7 @@ void testBase() {
 
     add_to_filesystem("/a1/file1.txt", 0);
     add_to_filesystem("/a1/file2.txt", 0);
-
+    // format("10MB");
 
     add_to_filesystem("/large_file.txt", 0);
     // int index = find_file("/large_file.txt");
@@ -744,11 +786,17 @@ void testBase() {
     // ls(NULL);//fix
     // outcp("zzooss.txt", "zxc.txt"); //true
         // load("C:/v/commands.txt"); true
-    format("100MB");
+    for (size_t i = 0; i < file_count; i++) {
+        printf("%zu) %s start=%zu end=%zu size=%zu is_dir=%d\n",
+               i, filesystem[i].filename, filesystem[i].start_cluster,
+               filesystem[i].end_cluster, filesystem[i].size,
+               filesystem[i].is_directory);
+    }
+
     printf("%llu\n",filesystem[index].size);
     info("/large_file.txt");
-    printf("%s",disk_filename);
-
+    fs_info();
+    bug("large_file");
 
     // ls(NULL);
     // printf("123\n");
