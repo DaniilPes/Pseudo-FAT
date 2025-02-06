@@ -12,8 +12,9 @@
 #define FAT_FREE (-1)
 #define FAT_END (-2)
 
-int fat[MAX_CLUSTERS];
+int *fat = NULL;
 static size_t cluster_count = 0;
+static size_t max_clusters = MAX_CLUSTERS;
 
 // Pseudo FAT structure (simplified for the task)
 typedef struct {
@@ -117,9 +118,24 @@ void fs_info() {
 }
 
 void initialize_fat() {
-    for (int i = 0; i < MAX_CLUSTERS; i++) {
+     // printf("-%llu-\n", max_clusters);
+
+    // Освобождаем старый fat, если он уже выделен
+    if (fat != NULL) {
+        free(fat);
+    }
+
+    // Выделяем память под FAT
+    fat = (int*)malloc(max_clusters * sizeof(int));
+    if (!fat) {
+        printf("ERROR: Cannot allocate FAT\n");
+        exit(EXIT_FAILURE);
+    }
+
+    for (int i = 0; i < max_clusters; i++) {
         fat[i] = FAT_FREE; // Все кластеры свободны
     }
+    // printf("-%llu-\n",max_clusters);
 }
 
 // Mock file system initialization
@@ -139,7 +155,7 @@ int allocate_cluster(FileEntry *file_entry) {
     int first_cluster = -1;
     file_entry->end_cluster = -1; // Сброс end_cluster перед началом
 
-    for (int i = 0; i < MAX_CLUSTERS && clusters_needed > 0; i++) {
+    for (int i = 0; i < max_clusters && clusters_needed > 0; i++) {
         if (fat[i] == FAT_FREE) {
             if (first_cluster == -1) {
                 first_cluster = i; // Первый кластер
@@ -531,12 +547,13 @@ void cat(const char *filename) {
 }
 
 void info(const char *name) {
-    char full_path[MAX_PATH_LENGTH];
-    if (name[0] == '/') {
-        strncpy(full_path, name, MAX_PATH_LENGTH);
-    } else {
-        snprintf(full_path, MAX_PATH_LENGTH, "%s/%s", current_path, name);
+    if (!name || strlen(name) == 0) {
+        printf("INVALID ARGUMENTS\n");
+        return;
     }
+
+    char full_path[MAX_PATH_LENGTH];
+    normalize_path(full_path, name); // Поддержка относительных и абсолютных путей
 
     int index = find_file(full_path);
     if (index == -1) {
@@ -544,24 +561,25 @@ void info(const char *name) {
         return;
     }
 
-    size_t start = filesystem[index].start_cluster;
-
+    // Если это папка, кластеры не выделяются
     if (filesystem[index].is_directory) {
         printf("%s: Is a directory, no clusters allocated\n", filesystem[index].filename);
         return;
     }
 
-    if (fat[start] == FAT_FREE) {
+    // Проверяем, есть ли кластеры
+    if (filesystem[index].start_cluster == FAT_FREE) {
         printf("%s: No clusters allocated\n", filesystem[index].filename);
         return;
     }
 
-    printf("%s: Clusters %zu", filesystem[index].filename, start);
+    // Выводим кластеры
+    printf("%s: Clusters %zu", filesystem[index].filename, filesystem[index].start_cluster);
 
-    size_t current = start;
+    size_t current = filesystem[index].start_cluster;
     while (fat[current] != FAT_END) {
         current = fat[current];
-        printf(" -> %zu", current); // Добавляем вывод промежуточных кластеров
+        printf(" -> %zu", current);
     }
 
     printf("\n");
@@ -608,20 +626,25 @@ void incp(const char *args) {
     size_t file_size = ftell(src);
     rewind(src);
 
-    // Создаём новый файл в файловой системе
+    size_t needed_clusters = (file_size + CLUSTER_SIZE - 1) / CLUSTER_SIZE;
+    int free_clusters = count_free_clusters();
+
+    printf("___Cluster needeed: %zu / Clusters available: %d___\n", needed_clusters, free_clusters);
+
+    if (needed_clusters > free_clusters) {
+        printf("NO FREE CLUSTERS\n");
+        fclose(src);
+        return;
+    }
+
+    // 🔥 Теперь можно безопасно выделять кластеры
     FileEntry new_file;
     strncpy(new_file.filename, full_path, MAX_PATH_LENGTH);
     new_file.size = file_size;
     new_file.start_cluster = allocate_cluster(&new_file);
     new_file.is_directory = 0;
 
-    if (file_size/CLUSTER_SIZE < count_free_clusters()) {
-        printf("NO FREE CLUSTERS\n");
-        fclose(src);
-        return;
-    }
-
-    // Записываем данные в псевдо-FS (симуляция)
+    // Добавляем файл в файловую систему
     filesystem[file_count++] = new_file;
 
     fclose(src);
@@ -748,41 +771,36 @@ void load(const char *filename) {
 }
 
 void format(const char *arg) {
-    // arg может быть "600MB" или просто "600" и т.п.
-
     if (!arg || !*arg) {
         printf("CANNOT CREATE FILE\n");
         return;
     }
 
-    // Разбираем строку "600MB" на число (600) и суффикс (MB)
-    long size_mb = 0;
+    long size = 0;
     char suffix[8] = {0};
 
-    // Пример простого разбора: берем число и до 2 символов суффикса
-    // Если строка "600MB", то size_mb=600, suffix="MB"
-    // Если "600", то size_mb=600, suffix=""
-    if (sscanf(arg, "%ld%2s", &size_mb, suffix) < 1) {
-        // Не смогли хотя бы число считать
+    // Разбираем строку "600MB", "600KB" или "600"
+    if (sscanf(arg, "%ld%2s", &size, suffix) < 1) {
         printf("CANNOT CREATE FILE\n");
         return;
     }
 
-    // Проверка суффикса (если надо строго требовать "MB", делайте иначе)
-    // Допустим, разрешим и без суффикса:
-    if (strcasecmp(suffix, "MB") != 0 && suffix[0] != '\0') {
-        // Если суффикс не "MB" и не пуст, считаем ошибкой
+    // 🔥 Определяем размер в байтах (по умолчанию - мегабайты)
+    size_t required_size = 0;
+
+    if (suffix[0] == '\0' || strcasecmp(suffix, "MB") == 0) {
+        required_size = (size_t)size * 1024 * 1024;  // По умолчанию MB
+    } else if (strcasecmp(suffix, "KB") == 0) {
+        required_size = (size_t)size * 1024;  // Килобайты
+    } else {
         printf("CANNOT CREATE FILE\n");
         return;
     }
 
-    if (size_mb <= 0) {
+    if (size <= 0) {
         printf("CANNOT CREATE FILE\n");
         return;
     }
-
-    // Переводим мегабайты в байты
-    size_t required_size = (size_t)size_mb * 1024 * 1024;
 
     // Используем файл, заданный при запуске (disk_filename)
     FILE *fs_file = fopen(disk_filename, "wb");
@@ -791,7 +809,7 @@ void format(const char *arg) {
         return;
     }
 
-    // Устанавливаем новый размер
+    // Устанавливаем новый размер файла-образа
     if (ftruncate(fileno(fs_file), required_size) != 0) {
         fclose(fs_file);
         printf("CANNOT CREATE FILE\n");
@@ -800,11 +818,15 @@ void format(const char *arg) {
 
     fclose(fs_file);
 
-    // Сбрасываем/инициализируем вашу псевдо-ФС в памяти:
+    max_clusters = required_size/ CLUSTER_SIZE;
+
+    printf("_%llu_ / _%llu_\n",max_clusters,required_size);
+    // Сбрасываем/инициализируем файловую систему
     initialize_filesystem();
 
     printf("OK\n");
 }
+
 
 void test_functions() {
     initialize_filesystem();
@@ -884,9 +906,9 @@ void bug(const char *arg) {
 
 void check() {
     int corrupted_found = 0;
-    for (int i = 0; i < MAX_CLUSTERS; i++) {
+    for (int i = 0; i < max_clusters; i++) {
         // Разрешённые значения: FAT_FREE, FAT_END или валидный указатель на следующий кластер
-        if (fat[i] != FAT_FREE && fat[i] != FAT_END && (fat[i] < 0 || fat[i] >= MAX_CLUSTERS)) {
+        if (fat[i] != FAT_FREE && fat[i] != FAT_END && (fat[i] < 0 || fat[i] >= max_clusters)) {
             printf("Cluster %d is corrupted: value %d\n", i, fat[i]);
             corrupted_found++;
         }
@@ -899,7 +921,7 @@ void check() {
 
 int count_free_clusters() {
     int free_clusters = 0;
-    for (int i = 0; i < MAX_CLUSTERS; i++) {
+    for (int i = 0; i < max_clusters; i++) {
         if (fat[i] == FAT_FREE) {
             free_clusters++;
         }
@@ -1020,6 +1042,8 @@ int main(int argc, char *argv[]) {
         // Передаём команду в ваш парсер
         execute_command_with_args(line);
     }
+
+    free(fat);
 
     return EXIT_SUCCESS;
 }
