@@ -49,6 +49,8 @@ void bug(const char *arg);
 void check();
 void fs_info();
 int count_free_clusters();
+void write_cluster_data(int cluster_index, const char *data, size_t size);
+void read_cluster_data(int cluster_index, char *buffer, size_t size);
 
 void remove_directory_wrapper(const char *arg) {
     remove_directory(arg); // Вызов оригинальной функции с адаптированным аргументом
@@ -118,8 +120,6 @@ void fs_info() {
 }
 
 void initialize_fat() {
-     // printf("-%llu-\n", max_clusters);
-
     // Освобождаем старый fat, если он уже выделен
     if (fat != NULL) {
         free(fat);
@@ -135,7 +135,6 @@ void initialize_fat() {
     for (int i = 0; i < max_clusters; i++) {
         fat[i] = FAT_FREE; // Все кластеры свободны
     }
-    // printf("-%llu-\n",max_clusters);
 }
 
 // Mock file system initialization
@@ -537,13 +536,38 @@ void rm(const char *filename) {
 
 // Function to display file content
 void cat(const char *filename) {
-    int file_index = find_file(filename);
+    char full_path[MAX_PATH_LENGTH];
+    normalize_path(full_path, filename);
+
+    int file_index = find_file(full_path);
     if (file_index == -1 || filesystem[file_index].is_directory) {
         printf("FILE NOT FOUND\n");
         return;
     }
 
-    printf("OBSAH\n"); // Simulate file content output
+    FileEntry *file = &filesystem[file_index];
+
+    if (file->size == 0) {
+        printf("FILE EMPTY\n");
+        return;
+    }
+
+    size_t cluster_index = file->start_cluster;
+    size_t bytes_left = file->size;
+    char buffer[CLUSTER_SIZE];
+
+    while (bytes_left > 0 && cluster_index != FAT_END) {
+        size_t to_read = (bytes_left > CLUSTER_SIZE) ? CLUSTER_SIZE : bytes_left;
+
+        // 📖 Читаем данные из кластера (симулируя работу с диском)
+        read_cluster_data(cluster_index, buffer, to_read);
+        fwrite(buffer, 1, to_read, stdout);
+
+        bytes_left -= to_read;
+        cluster_index = fat[cluster_index];  // Переход к следующему кластеру
+    }
+
+    printf("\n");
 }
 
 void info(const char *name) {
@@ -593,7 +617,6 @@ void incp(const char *args) {
 
     char source[MAX_PATH_LENGTH], destination[MAX_PATH_LENGTH];
 
-    // Разбираем строку args: "source destination"
     int parsed = sscanf(args, "%s %s", source, destination);
     if (parsed != 2) {
         printf("INVALID ARGUMENTS\n");
@@ -621,7 +644,6 @@ void incp(const char *args) {
         return;
     }
 
-    // Определяем размер файла
     fseek(src, 0, SEEK_END);
     size_t file_size = ftell(src);
     rewind(src);
@@ -629,7 +651,7 @@ void incp(const char *args) {
     size_t needed_clusters = (file_size + CLUSTER_SIZE - 1) / CLUSTER_SIZE;
     int free_clusters = count_free_clusters();
 
-    printf("___Cluster needeed: %zu / Clusters available: %d___\n", needed_clusters, free_clusters);
+    printf("need:%zu / free:%zu\n",needed_clusters,free_clusters);
 
     if (needed_clusters > free_clusters) {
         printf("NO FREE CLUSTERS\n");
@@ -637,19 +659,35 @@ void incp(const char *args) {
         return;
     }
 
-    // 🔥 Теперь можно безопасно выделять кластеры
+    // Создаем запись о файле в псевдо-FAT
     FileEntry new_file;
     strncpy(new_file.filename, full_path, MAX_PATH_LENGTH);
     new_file.size = file_size;
     new_file.start_cluster = allocate_cluster(&new_file);
     new_file.is_directory = 0;
 
-    // Добавляем файл в файловую систему
     filesystem[file_count++] = new_file;
+
+    // Записываем данные файла в FAT-подобную систему (на диск)
+    size_t cluster_index = new_file.start_cluster;
+    size_t bytes_left = file_size;
+    char buffer[CLUSTER_SIZE];
+
+    while (bytes_left > 0 && cluster_index != FAT_END) {
+        size_t to_read = (bytes_left > CLUSTER_SIZE) ? CLUSTER_SIZE : bytes_left;
+        fread(buffer, 1, to_read, src);
+
+        // 📝 Здесь нужно записывать `buffer` в реальный файл, симулирующий диск (например, в бинарный файл).
+        write_cluster_data(cluster_index, buffer, to_read);
+
+        bytes_left -= to_read;
+        cluster_index = fat[cluster_index];  // Переход к следующему кластеру
+    }
 
     fclose(src);
     printf("OK\n");
 }
+
 
 void outcp(const char *args) {
     if (!args || strlen(args) == 0) {
@@ -659,7 +697,6 @@ void outcp(const char *args) {
 
     char source[MAX_PATH_LENGTH], destination[MAX_PATH_LENGTH];
 
-    // Разбираем строку args: "source destination"
     int parsed = sscanf(args, "%s %s", source, destination);
     if (parsed != 2) {
         printf("INVALID ARGUMENTS\n");
@@ -669,11 +706,13 @@ void outcp(const char *args) {
     char full_path[MAX_PATH_LENGTH];
     normalize_path(full_path, source);
 
-    int index = find_file(full_path);
-    if (index == -1) {
+    int file_index = find_file(full_path);
+    if (file_index == -1) {
         printf("FILE NOT FOUND\n");
         return;
     }
+
+    FileEntry *file = &filesystem[file_index];
 
     FILE *dest = fopen(destination, "wb");
     if (!dest) {
@@ -681,12 +720,19 @@ void outcp(const char *args) {
         return;
     }
 
-    FileEntry *file = &filesystem[index];
+    size_t cluster_index = file->start_cluster;
+    size_t bytes_left = file->size;
+    char buffer[CLUSTER_SIZE];
 
-    // 🔥 Симуляция чтения данных из псевдо-FAT (пока что просто заполняем нулями)
-    char *buffer = (char *)calloc(1, file->size);
-    fwrite(buffer, 1, file->size, dest);
-    free(buffer);
+    while (bytes_left > 0 && cluster_index != FAT_END) {
+        size_t to_read = (bytes_left > CLUSTER_SIZE) ? CLUSTER_SIZE : bytes_left;
+
+        read_cluster_data(cluster_index, buffer, to_read);
+        fwrite(buffer, 1, to_read, dest);
+
+        bytes_left -= to_read;
+        cluster_index = fat[cluster_index];  // Переход к следующему кластеру
+    }
 
     fclose(dest);
     printf("OK\n");
@@ -820,13 +866,12 @@ void format(const char *arg) {
 
     max_clusters = required_size/ CLUSTER_SIZE;
 
-    printf("_%llu_ / _%llu_\n",max_clusters,required_size);
+    printf("_max_clusters: %llu_ / _required_size:%llu_\n",max_clusters,required_size);
     // Сбрасываем/инициализируем файловую систему
     initialize_filesystem();
 
     printf("OK\n");
 }
-
 
 void test_functions() {
     initialize_filesystem();
@@ -928,73 +973,34 @@ int count_free_clusters() {
     }
     return free_clusters;
 }
-
-
-void testBase() {
-    initialize_filesystem();
-
-    // Add files and directories
-    add_to_filesystem("s1.txt", 0);
-    filesystem[find_file("/s1.txt")].size = 1024;
-    add_to_filesystem("example.txt", 0);
-    add_to_filesystem("a1", 1);
-
-    printf("Start Test...\n");
-    // cat("//a1/s1.txt");
-    // cd("//a1");
-    // pwd();
-
-    // rabochka ===========================
-
-    //10 - 14
-    for (size_t i = 0; i < file_count; i++) {
-        printf("FILE: %s, IS_DIR: %d\n", filesystem[i].filename, filesystem[i].is_directory);
+void read_cluster_data(int cluster_index, char *buffer, size_t size) {
+    FILE *fs_file = fopen(disk_filename, "rb"); // Открываем файл только для чтения
+    if (!fs_file) {
+        printf("ERROR: Cannot open filesystem file\n");
+        return;
     }
 
-    add_to_filesystem("/a1/file1.txt", 0);
-    add_to_filesystem("/a1/file2.txt", 0);
-    // format("10MB");
+    size_t offset = cluster_index * CLUSTER_SIZE;  // Определяем смещение кластера в файле
+    fseek(fs_file, offset, SEEK_SET);  // Перемещаем указатель файла
+    fread(buffer, 1, size, fs_file);  // Читаем данные
 
-    add_to_filesystem("/large_file.txt", 0);
-    // int index = find_file("/large_file.txt");
-    // filesystem[index].size = 7 * 4096; // Файл занимает 10 кластеров
-    // allocate_cluster(&filesystem[index]);
-    // info("/large_file.txt");
-
-    int index = find_file("/large_file.txt");
-    if (index != -1) {
-        filesystem[index].size = 50 * 4096; // 7 кластеров по 4096 байт
-        allocate_cluster(&filesystem[index]);
-        info("/large_file.txt");
-
-    } else {
-        printf("Error: File not found in filesystem\n");
-    }
-
-
-
-
-
-    // info("/s1.txt"); true
-    // incp("z.txt", "zzooss.txt"); //fix
-    // ls(NULL);//fix
-    // outcp("zzooss.txt", "zxc.txt"); //true
-        // load("C:/v/commands.txt"); true
-
-
-    printf("%llu\n",filesystem[index].size);
-    info("/large_file.txt");
-    fs_info();
-
-    bug("large_file");
-    check();
-
-
-    // ls(NULL);
-    // printf("123\n");
-    // cd("//");
-    // ls(NULL);
+    fclose(fs_file);
 }
+
+void write_cluster_data(int cluster_index, const char *data, size_t size) {
+    FILE *fs_file = fopen(disk_filename, "r+b"); // Открываем файл для чтения и записи
+    if (!fs_file) {
+        printf("ERROR: Cannot open filesystem file\n");
+        return;
+    }
+
+    size_t offset = cluster_index * CLUSTER_SIZE;  // Определяем смещение кластера в файле
+    fseek(fs_file, offset, SEEK_SET);  // Перемещаем указатель файла
+    fwrite(data, 1, size, fs_file);  // Записываем данные
+
+    fclose(fs_file);
+}
+
 
 int main(int argc, char *argv[]) {
     if (argc != 2) {
@@ -1006,12 +1012,14 @@ int main(int argc, char *argv[]) {
     disk_filename[MAX_PATH_LENGTH - 1] = '\0'; // защита от переполнения
 
     initialize_filesystem();
+    format("4000kb");
     add_to_filesystem("f1", 0);
     add_to_filesystem("f2", 0);
     // format("10MB");
     add_to_filesystem("a1", 1);
     add_to_filesystem("a1/f3", 0);
     add_to_filesystem("aue", 1);
+    incp("zxc.txt zxc.txt");
 
 
         // testBase();
