@@ -39,14 +39,15 @@ void cat(const char *arg);
 void cd(const char *arg);
 void pwd();
 void info(const char *arg);
-void incp(const char *arg1, const char *arg2);
-void outcp(const char *arg1, const char *arg2);
+void incp(const char *arg1);
+void outcp(const char *arg1);
 void format(const char *arg);
 void load(const char *filename);
 void normalize_path();
 void bug(const char *arg);
 void check();
 void fs_info();
+int count_free_clusters();
 
 void remove_directory_wrapper(const char *arg) {
     remove_directory(arg); // Вызов оригинальной функции с адаптированным аргументом
@@ -131,6 +132,10 @@ void initialize_filesystem() {
 
 int allocate_cluster(FileEntry *file_entry) {
     size_t clusters_needed = (file_entry->size + CLUSTER_SIZE - 1) / CLUSTER_SIZE;
+    if (count_free_clusters() < clusters_needed) {
+        return -1;  // Недостаточно места
+    }
+
     int first_cluster = -1;
     file_entry->end_cluster = -1; // Сброс end_cluster перед началом
 
@@ -215,8 +220,8 @@ void add_to_filesystem(const char *name, int is_directory) {
 // Function to list files in a directory
 void ls(const char *dirname) {
     char target_path[MAX_PATH_LENGTH];
-
-    if (dirname == NULL || strcmp(dirname, "") == 0) {
+    // printf("zv-%s-zv\n", dirname);
+    if (dirname == NULL || strcmp(dirname, "") == 0 || strcmp(dirname, "ls") == 0) {
         strncpy(target_path, current_path, MAX_PATH_LENGTH);
     } else {
         normalize_path(target_path, dirname);
@@ -258,9 +263,22 @@ void ls(const char *dirname) {
             const char *subpath = filesystem[i].filename + target_len;
 
             // Пропускаем вложенные файлы и папки (оставляем только элементы первого уровня)
-            if (strchr(subpath, '/') != NULL || strlen(subpath) == 0) {
+            // if (strchr(subpath, '/') != NULL || strlen(subpath) == 0) {
+            //     printf("zzz\n");
+            //     continue;
+            // }
+            // 🔥 Новый фикс: Ищем первый `/` после target_path
+
+            if (strlen(subpath) == 0) {
                 continue;
             }
+
+            // Проверяем, есть ли символы после `/` в `subpath`
+            // char *slash_pos = strchr(subpath, '/');
+            // if (slash_pos != NULL && *(slash_pos + 1) != '\0') {
+            //     continue;  // Если после '/' есть символы, пропускаем этот элемент
+            // }
+
 
             printf("%s: %s\n", filesystem[i].is_directory ? "DIR" : "FILE", subpath);
             found = 1;
@@ -271,6 +289,7 @@ void ls(const char *dirname) {
         printf("EMPTY\n");
     }
 }
+
 
 // Function to change current directory
 void cd(const char *dirname) {
@@ -342,7 +361,6 @@ int remove_directory(const char *dirname) {
     printf("OK\n");
     return 0;
 }
-
 
 // Function to copy a file in the pseudo filesystem
 void cp(const char *args) {
@@ -549,18 +567,32 @@ void info(const char *name) {
     printf("\n");
 }
 
-void incp(const char *src_path, const char *dest_name) {
-    FILE *src = fopen(src_path, "rb");
+void incp(const char *args) {
+    if (!args || strlen(args) == 0) {
+        printf("INVALID ARGUMENTS\n");
+        return;
+    }
+
+    char source[MAX_PATH_LENGTH], destination[MAX_PATH_LENGTH];
+
+    // Разбираем строку args: "source destination"
+    int parsed = sscanf(args, "%s %s", source, destination);
+    if (parsed != 2) {
+        printf("INVALID ARGUMENTS\n");
+        return;
+    }
+
+    FILE *src = fopen(source, "rb");
     if (!src) {
         printf("FILE NOT FOUND\n");
         return;
     }
 
     char full_path[MAX_PATH_LENGTH];
-    snprintf(full_path, MAX_PATH_LENGTH, "%s/%s", current_path, dest_name);
+    normalize_path(full_path, destination);
 
     if (find_file(full_path) != -1) {
-        printf("PATH NOT FOUND\n");
+        printf("EXIST\n");
         fclose(src);
         return;
     }
@@ -571,24 +603,48 @@ void incp(const char *src_path, const char *dest_name) {
         return;
     }
 
+    // Определяем размер файла
     fseek(src, 0, SEEK_END);
     size_t file_size = ftell(src);
     rewind(src);
 
+    // Создаём новый файл в файловой системе
     FileEntry new_file;
     strncpy(new_file.filename, full_path, MAX_PATH_LENGTH);
     new_file.size = file_size;
-    new_file.start_cluster = file_count; // Simplified clustering logic
+    new_file.start_cluster = allocate_cluster(&new_file);
     new_file.is_directory = 0;
 
+    if (file_size/CLUSTER_SIZE < count_free_clusters()) {
+        printf("NO FREE CLUSTERS\n");
+        fclose(src);
+        return;
+    }
+
+    // Записываем данные в псевдо-FS (симуляция)
     filesystem[file_count++] = new_file;
+
     fclose(src);
     printf("OK\n");
 }
 
-void outcp(const char *src_name, const char *dest_path) {
+void outcp(const char *args) {
+    if (!args || strlen(args) == 0) {
+        printf("INVALID ARGUMENTS\n");
+        return;
+    }
+
+    char source[MAX_PATH_LENGTH], destination[MAX_PATH_LENGTH];
+
+    // Разбираем строку args: "source destination"
+    int parsed = sscanf(args, "%s %s", source, destination);
+    if (parsed != 2) {
+        printf("INVALID ARGUMENTS\n");
+        return;
+    }
+
     char full_path[MAX_PATH_LENGTH];
-    snprintf(full_path, MAX_PATH_LENGTH, "%s/%s", current_path, src_name);
+    normalize_path(full_path, source);
 
     int index = find_file(full_path);
     if (index == -1) {
@@ -596,14 +652,19 @@ void outcp(const char *src_name, const char *dest_path) {
         return;
     }
 
-    FILE *dest = fopen(dest_path, "wb");
+    FILE *dest = fopen(destination, "wb");
     if (!dest) {
         printf("PATH NOT FOUND\n");
         return;
     }
 
-    // Simulated write
-    fwrite("SIMULATED FILE DATA", 1, filesystem[index].size, dest);
+    FileEntry *file = &filesystem[index];
+
+    // 🔥 Симуляция чтения данных из псевдо-FAT (пока что просто заполняем нулями)
+    char *buffer = (char *)calloc(1, file->size);
+    fwrite(buffer, 1, file->size, dest);
+    free(buffer);
+
     fclose(dest);
     printf("OK\n");
 }
@@ -836,6 +897,17 @@ void check() {
         printf("Total corrupted clusters: %d\n", corrupted_found);
 }
 
+int count_free_clusters() {
+    int free_clusters = 0;
+    for (int i = 0; i < MAX_CLUSTERS; i++) {
+        if (fat[i] == FAT_FREE) {
+            free_clusters++;
+        }
+    }
+    return free_clusters;
+}
+
+
 void testBase() {
     initialize_filesystem();
 
@@ -845,25 +917,7 @@ void testBase() {
     add_to_filesystem("example.txt", 0);
     add_to_filesystem("a1", 1);
 
-
-
-
     printf("Start Test...\n");
-    // printf("1 - 4\n");
-    // // 1 - 4
-    // cp("//s1.txt","//a1/");
-    // mv("//s1.txt","//a1/s1.txt");
-    // // rm("//a1/s1.txt");
-    // create_directory("a2");
-    //
-    // // 5 - 9
-    // printf("5 - 9\n");
-    // remove_directory("a2");
-    //
-    // printf("---------------\n");
-    // ls("/");
-    // printf("---------------\n");
-    //
     // cat("//a1/s1.txt");
     // cd("//a1");
     // pwd();
