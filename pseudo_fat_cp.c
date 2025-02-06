@@ -53,6 +53,7 @@ void fs_info();
 int count_free_clusters();
 void write_cluster_data(int cluster_index, const char *data, size_t size);
 void read_cluster_data(int cluster_index, char *buffer, size_t size);
+void free_clusters(FileEntry *file);
 
 void remove_directory_wrapper(const char *arg) {
     remove_directory(arg); // Вызов оригинальной функции с адаптированным аргументом
@@ -74,7 +75,8 @@ Command command_table[] = {
     {"format", (void (*)(const char *))format},
     {"load", load},
     {"bug", bug},     // Добавляем команду bug
-    {"check", check}  // Добавляем команду check
+    {"check", check},  // Добавляем команду check
+    {"fs", fs_info}  // Добавляем команду check
 };
 
 // Simulated pseudo-FAT file system metadata
@@ -296,11 +298,6 @@ void cd(const char *dirname) {
     char new_path[MAX_PATH_LENGTH];
     normalize_path(new_path, dirname);
 
-    if (strcmp(dirname, ".") == 0) {
-        printf("OK\n");
-        return;
-    }
-
     if (strcmp(dirname, "..") == 0) {
         // Подняться на уровень выше
         char *last_slash = strrchr(current_path, '/');
@@ -329,26 +326,63 @@ void pwd() {
 }
 
 void create_directory(const char *dirname) {
-    add_to_filesystem(dirname, 1);
+    char full_path[MAX_PATH_LENGTH];
+    normalize_path(full_path, dirname);
+
+    // Ensure directory paths end with '/'
+    if (full_path[strlen(full_path) - 1] != '/') {
+        strncat(full_path, "/", MAX_PATH_LENGTH - strlen(full_path) - 1);
+    }
+
+    if (find_file(full_path) != -1) {  // Check if directory already exists
+        printf("DIRECTORY ALREADY EXISTS\n");
+        return;
+    }
+
+    if (file_count >= MAX_FILES) {
+        printf("Filesystem is full.\n");
+        return;
+    }
+
+    FileEntry new_entry;
+    strncpy(new_entry.filename, full_path, MAX_PATH_LENGTH);
+    new_entry.size = 0;
+    new_entry.start_cluster = FAT_FREE;
+    new_entry.is_directory = 1;
+
+    filesystem[file_count++] = new_entry;
+    printf("OK\n");
 }
 
+// Улучшенная rmdir (рекурсивное удаление и освобождение кластеров)
 int remove_directory(const char *dirname) {
     char full_path[MAX_PATH_LENGTH];
     normalize_path(full_path, dirname);
 
     int dir_index = find_file(full_path);
     if (dir_index == -1 || !filesystem[dir_index].is_directory) {
-        printf("FILE NOT FOUND\n");
+        printf("DIRECTORY NOT FOUND\n");
         return -1;
     }
 
-    // Проверяем, есть ли внутри директории файлы/папки
-    for (size_t i = 0; i < file_count; i++) {
+    // Удаляем содержимое директории (рекурсивно)
+    for (size_t i = 0; i < file_count; ) {
         if (strncmp(filesystem[i].filename, full_path, strlen(full_path)) == 0 &&
             strlen(filesystem[i].filename) > strlen(full_path)) {
 
-            // Если внутри есть файлы или папки, рекурсивно удаляем их
-            remove_directory(filesystem[i].filename);
+            if (filesystem[i].is_directory) {
+                remove_directory(filesystem[i].filename); // Рекурсивно удаляем поддиректории
+            } else {
+                free_clusters(&filesystem[i]); // Освобождаем кластеры файлов
+            }
+
+            // Сдвигаем все файлы в массиве
+            for (size_t j = i; j < file_count - 1; j++) {
+                filesystem[j] = filesystem[j + 1];
+            }
+            file_count--;
+            } else {
+                i++;
             }
     }
 
@@ -460,14 +494,12 @@ void mv(const char *args) {
 
     char source[MAX_PATH_LENGTH], destination[MAX_PATH_LENGTH];
 
-    // Разбираем строку args: "f1 a1"
+    // Разбираем строку "source destination"
     int parsed = sscanf(args, "%s %s", source, destination);
     if (parsed != 2) {
         printf("INVALID ARGUMENTS\n");
         return;
     }
-
-    printf("source: %s _ dest: %s\n", source, destination); // Отладочный вывод
 
     char src_path[MAX_PATH_LENGTH], dest_path[MAX_PATH_LENGTH];
     normalize_path(src_path, source);
@@ -479,28 +511,43 @@ void mv(const char *args) {
         return;
     }
 
-    // Проверяем, существует ли уже объект с таким именем
+    // Проверяем, является ли destination папкой
     int dest_index = find_file(dest_path);
-
     if (dest_index != -1 && filesystem[dest_index].is_directory) {
-        // Если destination — это папка, добавляем к пути имя файла
-        char final_dest[MAX_PATH_LENGTH];
-        snprintf(final_dest, MAX_PATH_LENGTH, "%s/%s", dest_path, strrchr(src_path, '/') ? strrchr(src_path, '/') + 1 : src_path);
-        strncpy(dest_path, final_dest, MAX_PATH_LENGTH);
+        // Убираем лишний '/' и добавляем имя файла
+        snprintf(dest_path, MAX_PATH_LENGTH, "%s/%s", dest_path, strrchr(src_path, '/') ? strrchr(src_path, '/') + 1 : src_path);
+        normalize_path(dest_path, dest_path); // Убираем двойные слэши
     }
 
     // Проверяем, существует ли уже файл/папка с таким именем
     if (find_file(dest_path) != -1) {
-        printf("PATH NOT FOUND\n"); // Файл уже существует
+        printf("PATH ALREADY EXISTS\n");
         return;
     }
 
-    // Переименовываем/перемещаем файл
+    // Перемещаем файл
     strncpy(filesystem[src_index].filename, dest_path, MAX_PATH_LENGTH);
     printf("OK\n");
 }
 
-// Function to remove a file in the pseudo filesystem
+// Функция освобождения занятых кластеров файла
+void free_clusters(FileEntry *file) {
+    if (file->start_cluster == FAT_FREE) {
+        return; // У файла нет выделенных кластеров
+    }
+
+    int current = file->start_cluster;
+    while (current != FAT_END) {
+        int next = fat[current];
+        fat[current] = FAT_FREE; // Освобождаем кластер
+        current = next;
+    }
+
+    file->start_cluster = FAT_FREE; // Сбрасываем указатели в файле
+    file->end_cluster = FAT_FREE;
+}
+
+// Улучшенная функция удаления файла
 void rm(const char *filename) {
     char full_path[MAX_PATH_LENGTH];
     normalize_path(full_path, filename);
@@ -510,6 +557,14 @@ void rm(const char *filename) {
         printf("FILE NOT FOUND\n");
         return;
     }
+
+    FileEntry *file = &filesystem[index];
+    if (file->is_directory) {
+        printf("CANNOT REMOVE DIRECTORY WITH rm: %s\n", full_path);
+        return;
+    }
+
+    free_clusters(file); // Освобождаем кластеры файла
 
     for (size_t i = index; i < file_count - 1; i++) {
         filesystem[i] = filesystem[i + 1];
@@ -1021,11 +1076,10 @@ int main(int argc, char *argv[]) {
     disk_filename[MAX_PATH_LENGTH - 1] = '\0'; // защита от переполнения
 
     initialize_filesystem();
-    format("4000kb");
+    format("10mb");
     add_to_filesystem("f1", 0);
-    add_to_filesystem("f2", 0);
-    // format("10MB");
     add_to_filesystem("a1", 1);
+    add_to_filesystem("a1/a2", 1);
     add_to_filesystem("a1/f3", 0);
     add_to_filesystem("aue", 1);
     incp("zxc.txt zxc.txt");
