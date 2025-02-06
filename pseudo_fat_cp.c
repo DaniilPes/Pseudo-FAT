@@ -184,13 +184,7 @@ int find_file(const char *filename) {
 // Function to add a directory or file with correct path
 void add_to_filesystem(const char *name, int is_directory) {
     char full_path[MAX_PATH_LENGTH];
-    if (name[0] == '/') {
-        strncpy(full_path, name, MAX_PATH_LENGTH); // Абсолютный путь
-    } else if (strcmp(current_path, "/") == 0) {
-        snprintf(full_path, MAX_PATH_LENGTH, "/%s", name); // Корневой путь
-    } else {
-        snprintf(full_path, MAX_PATH_LENGTH, "%s/%s", current_path, name); // Поддиректория
-    }
+    normalize_path(full_path, name);
 
     if (find_file(full_path) != -1) {
         printf("EXIST\n");
@@ -205,21 +199,18 @@ void add_to_filesystem(const char *name, int is_directory) {
     FileEntry new_entry;
     strncpy(new_entry.filename, full_path, MAX_PATH_LENGTH);
     new_entry.size = 0;
-    new_entry.start_cluster = FAT_FREE; // По умолчанию кластер не выделен
+    new_entry.start_cluster = FAT_FREE;
     new_entry.is_directory = is_directory;
 
-    if (is_directory == 0 && new_entry.size > 0) {
-        int cluster = allocate_cluster(&new_entry); // Попробовать выделить кластер
-        if (cluster == -1) {
-            printf("NO FREE CLUSTERS\n");
-            return; // Если кластеры закончились, файл не добавляется
-        }
-        new_entry.start_cluster = cluster;
+    // 🔥 Новый фикс: если это папка, убеждаемся, что путь заканчивается на `/`
+    if (is_directory && full_path[strlen(full_path) - 1] != '/') {
+        strncat(new_entry.filename, "/", MAX_PATH_LENGTH - strlen(new_entry.filename) - 1);
     }
 
     filesystem[file_count++] = new_entry;
     printf("OK\n");
 }
+
 
 // Function to list files in a directory
 void ls(const char *dirname) {
@@ -238,18 +229,17 @@ void ls(const char *dirname) {
     }
 
     int found = 0;
-    int dir_exists = 0;  // Флаг существования директории
+    int dir_exists = 0;
 
     // Проверяем, существует ли папка
     for (size_t i = 0; i < file_count; i++) {
-        printf("%s === %s\n", filesystem[i].filename , target_path);
         if (strcmp(filesystem[i].filename, target_path) == 0 && filesystem[i].is_directory) {
             dir_exists = 1;
             break;
         }
     }
 
-    // Проверяем, есть ли внутри каталога файлы или подпапки (даже если он сам не записан в файловой системе)
+    // Проверяем, есть ли файлы или подпапки внутри каталога
     for (size_t i = 0; i < file_count; i++) {
         if (strncmp(filesystem[i].filename, target_path, target_len) == 0) {
             dir_exists = 1;
@@ -268,7 +258,7 @@ void ls(const char *dirname) {
             const char *subpath = filesystem[i].filename + target_len;
 
             // Пропускаем вложенные файлы и папки (оставляем только элементы первого уровня)
-            if (strchr(subpath, '/') != NULL) {
+            if (strchr(subpath, '/') != NULL || strlen(subpath) == 0) {
                 continue;
             }
 
@@ -277,11 +267,11 @@ void ls(const char *dirname) {
         }
     }
 
-    // Если папка существует, но в ней ничего нет, можно просто не выводить ничего
     if (!found) {
-        printf("EMPTY\n"); // Удалите эту строку, если нужно просто пустое место
+        printf("EMPTY\n");
     }
 }
+
 // Function to change current directory
 void cd(const char *dirname) {
     char new_path[MAX_PATH_LENGTH];
