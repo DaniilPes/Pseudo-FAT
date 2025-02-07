@@ -151,6 +151,7 @@ void initialize_filesystem() {
 // Allocate clusters for a file
 int allocate_cluster(FileEntry *file_entry) {
     size_t clusters_needed = (file_entry->size + CLUSTER_SIZE - 1) / CLUSTER_SIZE;
+    printf("Allocating %zu clusters for file of size %zu bytes\n", clusters_needed, file_entry->size);
     if (count_free_clusters() < clusters_needed) {
         return -1;  // Not enough space
     }
@@ -295,28 +296,77 @@ void ls(const char *dirname) {
 
 // Function to change current directory
 void cd(const char *dirname) {
-    char new_path[MAX_PATH_LENGTH];
-    normalize_path(new_path, dirname);
-
-    if (strcmp(dirname, "..") == 0) {
-        // Подняться на уровень выше
-        char *last_slash = strrchr(current_path, '/');
-        if (last_slash != NULL && last_slash != current_path) {
-            *last_slash = '\0';
-        } else {
-            strcpy(current_path, "/");
-        }
-        printf("OK - current path: %s\n", current_path);
+    if (!dirname || strlen(dirname) == 0) {
+        printf("INVALID ARGUMENT\n");
         return;
     }
 
+    char new_path[MAX_PATH_LENGTH];
+    normalize_path(new_path, dirname);
+
+    // **Обработка "cd /" (переход в корень)**
+    if (strcmp(dirname, "/") == 0) {
+        strcpy(current_path, "/");
+        printf("OK - current path: /\n");
+        return;
+    }
+
+    // **Обработка "cd .." и "cd ../" (поднятие на уровень выше)**
+    if (strcmp(dirname, "..") == 0 || strcmp(dirname, "../") == 0) {
+        if (strcmp(current_path, "/") == 0) {
+            printf("OK - current path: /\n");
+            return;
+        }
+
+        // Найти первый (последний) слэш
+        char *last_slash = strrchr(current_path, '/');
+        if (last_slash && last_slash != current_path) {
+            // Найти второй слэш с конца
+            char *second_last_slash = NULL;
+            for (char *p = current_path; p < last_slash; p++) {
+                if (*p == '/') {
+                    second_last_slash = p;  // Сохраняем положение второго слэша
+                }
+            }
+
+            if (second_last_slash) {
+                *second_last_slash = '\0';  // Отрезаем путь до второго слэша
+            } else {
+                strcpy(current_path, "/");  // Если второго слэша нет, значит, мы в корне
+            }
+        } else {
+            strcpy(current_path, "/");  // Если в пути только один слэш, остаемся в корне
+        }
+
+        if (current_path[strlen(current_path) - 1] != '/') {
+            strcat(current_path, "/");
+        }
+        printf("OK - current path123: %s\n", current_path);
+        return;
+    }
+
+    // **Обработка "cd ../.." (много уровней вверх)**
+    if (strncmp(dirname, "../", 3) == 0) {
+        cd("..");
+        cd(dirname + 3);  // Рекурсивно вызываем `cd` для оставшейся части пути
+        return;
+    }
+
+    // **Обрабатываем переход в директорию**
     int dir_index = find_file(new_path);
     if (dir_index == -1 || !filesystem[dir_index].is_directory) {
         printf("PATH NOT FOUND\n");
         return;
     }
 
+    // Обновляем текущий путь
     strncpy(current_path, new_path, MAX_PATH_LENGTH);
+
+    // **Гарантируем, что путь всегда заканчивается на "/"**
+    if (current_path[strlen(current_path) - 1] != '/') {
+        strcat(current_path, "/");
+    }
+
     printf("OK - current path: %s\n", current_path);
 }
 
@@ -329,14 +379,14 @@ void create_directory(const char *dirname) {
     char full_path[MAX_PATH_LENGTH];
     normalize_path(full_path, dirname);
 
-    // Ensure directory paths end with '/'
-    if (full_path[strlen(full_path) - 1] != '/') {
-        strncat(full_path, "/", MAX_PATH_LENGTH - strlen(full_path) - 1);
-    }
-
     if (find_file(full_path) != -1) {  // Check if directory already exists
         printf("DIRECTORY ALREADY EXISTS\n");
         return;
+    }
+
+    // Ensure directory paths end with '/'
+    if (full_path[strlen(full_path) - 1] != '/') {
+        strncat(full_path, "/", MAX_PATH_LENGTH - strlen(full_path) - 1);
     }
 
     if (file_count >= MAX_FILES) {
@@ -392,7 +442,7 @@ int remove_directory(const char *dirname) {
     }
     file_count--;
 
-    printf("OK\n");
+    printf("OK - %s removed\n",dirname);
     return 0;
 }
 
@@ -405,26 +455,11 @@ void cp(const char *args) {
 
     char source[MAX_PATH_LENGTH], destination[MAX_PATH_LENGTH];
 
-    // Разбираем строку args: "f1 a1"
     int parsed = sscanf(args, "%s %s", source, destination);
     if (parsed != 2) {
         printf("INVALID ARGUMENTS\n");
         return;
     }
-
-    // Проверка: destination не должен быть пустым или "/"
-    if (strlen(destination) == 0 || strcmp(destination, "/") == 0) {
-        printf("INVALID DESTINATION NAME\n");
-        return;
-    }
-
-    // Проверяем, заканчивается ли destination на "/"
-    if (destination[strlen(destination) - 1] == '/') {
-        printf("INVALID DESTINATION NAME: Cannot copy to a directory without a filename\n");
-        return;
-    }
-
-    printf("source: %s _ dest: %s\n", source, destination); // Отладочный вывод
 
     char src_path[MAX_PATH_LENGTH], dest_path[MAX_PATH_LENGTH];
     normalize_path(src_path, source);
@@ -438,9 +473,16 @@ void cp(const char *args) {
 
     FileEntry *src_entry = &filesystem[src_index];
 
-    // Проверяем, существует ли уже объект с таким именем
+    // Проверяем, является ли `destination` уже существующей директорией
+    int dest_index = find_file(dest_path);
+    if (dest_index != -1 && filesystem[dest_index].is_directory) {
+        snprintf(dest_path, MAX_PATH_LENGTH, "%s/%s", dest_path, strrchr(src_path, '/') ? strrchr(src_path, '/') + 1 : src_path);
+        normalize_path(dest_path, dest_path); // Убираем двойные слэши
+    }
+
+    // Проверяем, существует ли уже файл или папка с таким именем
     if (find_file(dest_path) != -1) {
-        printf("PATH NOT FOUND (alrdy exists)\n"); // Файл уже существует
+        printf("DESTINATION FILE OR DIRECTORY ALREADY EXISTS\n");
         return;
     }
 
@@ -449,40 +491,81 @@ void cp(const char *args) {
         return;
     }
 
-    // Если source — это папка, рекурсивно копируем её содержимое
-    if (src_entry->is_directory) {
-        printf("Copying directory %s -> %s\n", src_path, dest_path);
-
-        // Создаём новую папку
-        add_to_filesystem(dest_path, 1);
-
-        // Копируем всё содержимое
-        size_t src_len = strlen(src_path);
-        for (size_t i = 0; i < file_count; i++) {
-            if (strncmp(filesystem[i].filename, src_path, src_len) == 0 &&
-                filesystem[i].filename[src_len] == '/') {
-
-                char new_dest[MAX_PATH_LENGTH];
-                snprintf(new_dest, MAX_PATH_LENGTH, "%s%s", dest_path, filesystem[i].filename + src_len);
-
-                char sub_args[MAX_PATH_LENGTH * 2];
-                snprintf(sub_args, sizeof(sub_args), "%s %s", filesystem[i].filename, new_dest);
-
-                cp(sub_args);
-            }
-        }
-    } else {
-        // Копируем обычный файл
+    if (!src_entry->is_directory) {
         FileEntry new_file;
         strncpy(new_file.filename, dest_path, MAX_PATH_LENGTH);
         new_file.size = src_entry->size;
-        new_file.start_cluster = src_entry->start_cluster;
         new_file.is_directory = 0;
 
+        if (src_entry->size == 0) {
+            new_file.start_cluster = FAT_FREE;
+        } else {
+            new_file.start_cluster = allocate_cluster(&new_file);
+            if (new_file.start_cluster == -1) {
+                printf("NO FREE CLUSTERS\n");
+                return;
+            }
+
+            int src_cluster = src_entry->start_cluster;
+            int dest_cluster = new_file.start_cluster;
+            char buffer[CLUSTER_SIZE];
+
+            while (src_cluster != FAT_END) {
+                read_cluster_data(src_cluster, buffer, CLUSTER_SIZE);
+                write_cluster_data(dest_cluster, buffer, CLUSTER_SIZE);
+
+                int next_dest_cluster = fat[dest_cluster];
+                if (next_dest_cluster == FAT_END) break;
+
+                dest_cluster = next_dest_cluster;
+                src_cluster = fat[src_cluster];
+            }
+        }
+
         filesystem[file_count++] = new_file;
+        // printf("Copied file: %s -> %s\n", src_path, dest_path);
+        printf("OK\n");
+        return;
     }
 
-    printf("OK\n");
+    printf("Copying directory %s -> %s\n", src_path, dest_path);
+    add_to_filesystem(dest_path, 1);
+
+    // Удаляем лишний `/` в конце `src_path`, если он есть
+    if (src_path[strlen(src_path) - 1] == '/') {
+        src_path[strlen(src_path) - 1] = '\0';
+    }
+
+    size_t src_len = strlen(src_path);
+
+    for (size_t i = 0; i < file_count; i++) {
+        // **Пропускаем саму директорию `src_path`, чтобы не зациклиться**
+        if (strcmp(filesystem[i].filename, src_path) == 0 || strcmp(filesystem[i].filename, dest_path) == 0) {
+            continue;
+        }
+
+        // Проверяем, что файл/папка находится ВНУТРИ копируемой директории
+        if (strncmp(filesystem[i].filename, src_path, src_len) == 0 &&
+            filesystem[i].filename[src_len] == '/') {
+
+            printf("copying files...\n");
+
+            char new_dest[MAX_PATH_LENGTH];
+            snprintf(new_dest, MAX_PATH_LENGTH, "%s%s", dest_path, filesystem[i].filename + src_len);
+            normalize_path(new_dest, new_dest); // Убираем двойные слэши
+
+            char sub_args[MAX_PATH_LENGTH * 2];
+            snprintf(sub_args, sizeof(sub_args), "%s %s", filesystem[i].filename, new_dest);
+
+            // **Пропускаем копирование папки самой в себя**
+            if (strcmp(new_dest, src_path) == 0 || strcmp(new_dest, dest_path) == 0) {
+                printf("Skipping self-copy: %s\n", filesystem[i].filename);
+                continue;
+            }
+
+            cp(sub_args);
+        }
+    }
 }
 
 // Function to move or rename a file in the pseudo filesystem
@@ -1082,7 +1165,7 @@ int main(int argc, char *argv[]) {
     add_to_filesystem("a1/a2", 1);
     add_to_filesystem("a1/f3", 0);
     add_to_filesystem("aue", 1);
-    incp("zxc.txt zxc.txt");
+    incp("zxc.txt a1/zxc.txt");
 
 
         // testBase();
